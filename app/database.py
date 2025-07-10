@@ -25,25 +25,8 @@ Base = declarative_base()
 
 # Dependency with retry logic for cloud database connections
 def get_db():
-    max_retries = 3
-    retry_count = 0
-    retry_delay = 1  # Start with 1 second delay
-    
-    while retry_count < max_retries:
-        db = SessionLocal()
-        try:
-            # Test the connection with proper SQLAlchemy 2.0 syntax
-            db.execute(text("SELECT 1"))
-            yield db
-            break
-        except Exception as e:
-            retry_count += 1
-            db.close()
-            if retry_count >= max_retries:
-                # If we've exhausted retries, raise the exception
-                raise e
-            # Exponential backoff
-            time.sleep(retry_delay)
-            retry_delay *= 2
-        finally:
-            db.close()
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

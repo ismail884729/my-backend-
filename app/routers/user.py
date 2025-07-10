@@ -3,28 +3,51 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Union
 from datetime import datetime
 
-from .. import crud, models, schemas
+from .. import crud, models, schemas, auth
 from ..database import get_db
 
 router = APIRouter()
 
+@router.get("/me", response_model=schemas.UserResponse)
+async def read_users_me(current_user: models.User = Depends(auth.get_current_user)):
+    return current_user
+
 # Get user profile by ID
 @router.get("/{user_id}", response_model=schemas.UserResponse)
-def read_user(user_id: int, db: Session = Depends(get_db)):
-    user = crud.get_user(db, user_id)
+def read_user(user_id: str, db: Session = Depends(get_db)):
+    if not user_id.isdigit():
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user = crud.get_user(db, int(user_id))
     if not user:
         raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
     return user
 
 @router.get("/{user_id}/with-devices", response_model=schemas.UserWithDevicesResponse)
-def read_user_with_devices(user_id: int, db: Session = Depends(get_db)):
+def read_user_with_devices(user_id: str, db: Session = Depends(get_db)):
     """
     Get a user with all their assigned devices.
     """
-    user_with_devices = crud.get_user_with_devices(db, user_id)
+    if not user_id.isdigit():
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user_with_devices = crud.get_user_with_devices(db, int(user_id))
     if not user_with_devices:
         raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
     return user_with_devices
+
+@router.put("/me", response_model=schemas.UserResponse)
+async def update_current_user(
+    user_update: schemas.UserUpdate,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Update user fields
+    for field, value in user_update.dict(exclude_unset=True).items():
+        setattr(current_user, field, value)
+    
+    current_user.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(current_user)
+    return current_user
 
 # Update user profile
 @router.put("/{user_id}", response_model=schemas.UserResponse)
@@ -48,56 +71,43 @@ def update_user_profile(
     return user
 
 # Get user's transaction history
-@router.get("/transactions", response_model=List[schemas.TransactionResponse])
+@router.get("/{user_id}/transactions", response_model=List[schemas.TransactionResponse])
 def get_user_transactions(
-    user_id: int,
-    skip: int = 0, 
+    user_id: str,
+    skip: int = 0,
     limit: int = 100,
     status: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     # Get the specific user by ID
-    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user_id.isdigit():
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user = crud.get_user(db, int(user_id))
     if not user:
         raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
-    
-    # Create a joined query to get transaction and rate information
-    query = db.query(
-        models.Transaction, 
-        models.ElectricityRate.rate_name,
-        models.ElectricityRate.price_per_unit
-    ).join(
-        models.ElectricityRate, 
-        models.Transaction.rate_id == models.ElectricityRate.id
-    ).filter(models.Transaction.user_id == user.id)
-    
-    # Filter by status if provided
-    if status:
-        try:
-            transaction_status = models.TransactionStatus(status)
-            query = query.filter(models.Transaction.status == transaction_status)
-        except ValueError:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Invalid status value. Must be one of: {[s.value for s in models.TransactionStatus]}"
-            )
-    
-    # Get results with rate information
-    results = query.order_by(models.Transaction.created_at.desc()).offset(skip).limit(limit).all()
-    
+
+    # Get transactions using the CRUD function
+    transactions = crud.get_user_transactions(db, int(user_id), skip, limit, status)
+    if transactions is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status value. Must be one of: {[s.value for s in models.TransactionStatus]}"
+        )
+
     # Process results to include rate info in transaction objects
-    transactions = []
-    for transaction, rate_name, price_per_unit in results:
+    processed_transactions = []
+    for transaction in transactions:
+        rate = crud.get_electricity_rate(db, transaction.rate_id)
         transaction_dict = {
             **transaction.__dict__,
-            "rate_name": rate_name,
-            "price_per_unit": price_per_unit
+            "rate_name": rate.rate_name if rate else "N/A",
+            "price_per_unit": rate.price_per_unit if rate else 0.0
         }
         if "_sa_instance_state" in transaction_dict:
             del transaction_dict["_sa_instance_state"]
-        transactions.append(transaction_dict)
-    
-    return transactions
+        processed_transactions.append(transaction_dict)
+
+    return processed_transactions
 
 # Create new transaction (buy units)
 @router.post("/buy-units/{user_id}", response_model=schemas.TransactionResponse)
@@ -149,8 +159,8 @@ def buy_units(
         units_purchased=purchase.units,
         transaction_reference=f"TR-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{user.id}",
         status=models.TransactionStatus.PENDING,
-        balance_before=user.unit_balance,
-        balance_after=user.unit_balance + purchase.units,
+        balance_before=user.unit_balance, # Monetary balance before transaction
+        balance_after=user.unit_balance - amount, # Monetary balance after transaction
         device_id=device_id,
         payment_method="direct_transfer",  # Fixed payment method
         notes=purchase.notes,
@@ -158,8 +168,6 @@ def buy_units(
     )
     
     db.add(transaction)
-    db.commit()
-    db.refresh(transaction)
     
     # Set transaction to completed
     transaction.status = models.TransactionStatus.COMPLETED
@@ -168,22 +176,22 @@ def buy_units(
     # Transfer money from user to admin (update admin's balance)
     admin.unit_balance += transaction.amount
     
-    # Update user balance
-    user.unit_balance += purchase.units
+    # Update user balance (in money)
+    user.unit_balance -= amount
     
-    # Update the specified device's balance
+    # Update the specified device's balance (in units)
     if device_id:
         device = db.query(models.DeviceStatus).filter(models.DeviceStatus.device_id == device_id).first()
         if device:
-            device.unit_balance += purchase.units
-    # If no specific device, update primary device balance if exists
-    elif not device_id:
-        primary_device = crud.get_user_primary_device(db, user.id)
-        if primary_device:
-            primary_device.unit_balance += purchase.units
+            device.unit_balance += purchase.units # Device balance still tracks units
     
     db.commit()
     db.refresh(transaction)
+    db.refresh(user) # Refresh user to ensure latest balance is reflected
+    if device_id: # Refresh device if it was updated
+        db.refresh(device)
+    elif not device_id and primary_device: # Refresh primary device if it was updated
+        db.refresh(primary_device)
     
     # Fetch rate details to include in response
     transaction_dict = {
@@ -416,48 +424,42 @@ def register_device_for_user(
         new_device = crud.create_device(db, new_device_data)
         return new_device
 
-@router.get("/devices/{user_id}", response_model=List[schemas.DeviceStatusResponse])
-def get_user_devices(user_id: int, db: Session = Depends(get_db)):
+@router.get("/devices/{identifier}", response_model=Union[List[schemas.DeviceStatusResponse], schemas.DeviceStatusResponse])
+def get_devices(identifier: str, db: Session = Depends(get_db)):
     """
-    Get all devices associated with a user.
+    Get all devices for a user or a single device by its ID.
+    - If the identifier is numeric, it's treated as a user ID.
+    - If the identifier is a string (non-numeric), it's treated as a device ID.
     """
-    # Get the specific user by ID
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
-    
-    # Get all devices for this user
-    devices = crud.get_user_devices(db, user_id)
-    if not devices:
-        return []
-    
-    return devices
+    if identifier.isdigit():
+        user_id = int(identifier)
+        user = db.query(models.User).filter(models.User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+        
+        devices = crud.get_user_devices(db, user_id)
+        return devices
+    else:
+        device_id = identifier
+        device = crud.get_device_by_id(db, device_id)
+        if not device:
+            raise HTTPException(status_code=404, detail=f"Device with ID {device_id} not found")
+        return device
 
-@router.get("/devices/{user_id}/primary", response_model=schemas.DeviceStatusResponse)
-def get_user_primary_device(user_id: int, db: Session = Depends(get_db)):
+
+@router.get("/{user_id}/usage", response_model=schemas.UsageData)
+def get_user_usage_data(user_id: str, db: Session = Depends(get_db)):
     """
-    Get the primary device associated with a user.
+    Get a user's usage summary and transaction history.
     """
-    # Get the specific user by ID
-    user = db.query(models.User).filter(models.User.id == user_id).first()
+    # Check if user exists
+    if not user_id.isdigit():
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+    user = crud.get_user(db, int(user_id))
     if not user:
         raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
     
-    # Get primary device
-    device = crud.get_user_primary_device(db, user_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="No primary device associated with this user")
+    # Get usage data
+    usage_data = crud.get_user_usage(db, int(user_id))
     
-@router.get("/device-details/{device_id}", response_model=schemas.DeviceDetailResponse)
-def get_device_details(device_id: str, db: Session = Depends(get_db)):
-    """
-    Get detailed information about a specific device including usage metrics and installation details.
-    This endpoint is designed for the "My Devices" view in the frontend.
-    """
-    # Get detailed device information
-    device_details = crud.get_device_details(db, device_id)
-    if not device_details:
-        raise HTTPException(status_code=404, detail=f"Device with ID {device_id} not found")
-    
-    return device_details
-    return device
+    return usage_data

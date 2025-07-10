@@ -55,6 +55,15 @@ class UserWithDevicesResponse(UserResponse):
     class Config:
         from_attributes = True
 
+# Usage schemas
+class UsageSummary(BaseModel):
+    total_units_purchased: float
+    total_amount_spent: float
+
+class UsageData(BaseModel):
+    summary: UsageSummary
+    transactions: List["TransactionResponse"]
+
 # Transaction schemas
 class TransactionStatus(str, Enum):
     PENDING = "pending"
@@ -102,6 +111,19 @@ class AdminTransactionResponse(TransactionResponse):
     user_phone_number: Optional[str] = None
     device_name: Optional[str] = None
 
+class AdminDashboardStats(BaseModel):
+    total_users: int
+    total_devices: int
+    total_revenue: float
+    active_devices: int
+    units_sold: float
+    recent_transactions: List[TransactionResponse]
+
+class BillingStatistics(BaseModel):
+    total_revenue: float
+    total_transactions: int
+    average_transaction_value: float
+
 # Electricity Rate schemas
 class ElectricityRateBase(BaseModel):
     rate_name: str
@@ -128,8 +150,13 @@ class ElectricityRateResponse(ElectricityRateBase):
 
 # Device schemas
 class DeviceUpdate(BaseModel):
-    device_name: str
-    
+    device_name: Optional[str] = None
+    user_id: Optional[int] = None
+    is_online: Optional[bool] = None
+    unit_balance: Optional[float] = None
+    signal_strength: Optional[int] = None
+    is_primary: Optional[bool] = None
+
 class DeviceCreate(BaseModel):
     user_id: Optional[int] = None
     device_name: Optional[str] = None
@@ -214,3 +241,7 @@ class PasswordChange(BaseModel):
     username: str
     current_password: str
     new_password: str
+
+class MeterData(BaseModel):
+    device_id: str
+    unit_balance: float

@@ -26,7 +26,7 @@ class User(Base):
     phone_number = Column(String(15), nullable=True)
     role = Column(Enum(UserRole), default=UserRole.USER, nullable=False)
     
-    # Updated: balance in electricity units
+    # Updated:  amount  of  money in local currency
     unit_balance = Column(Float, default=0.0, nullable=False)
     
     is_active = Column(Boolean, default=True, nullable=False)
@@ -123,7 +123,7 @@ class DeviceStatus(Base):
     user = relationship("User", back_populates="devices")
     
     # Add relationship to transactions
-    transactions = relationship("Transaction", foreign_keys=[Transaction.device_id])
+    transactions = relationship("Transaction", foreign_keys=[Transaction.device_id], overlaps="device")
     
     def __repr__(self):
         return f"<DeviceStatus(device_id='{self.device_id}', unit_balance={self.unit_balance}, online={self.is_online})>"

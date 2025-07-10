@@ -7,7 +7,7 @@ from sqlalchemy import text
 from . import models
 from .database import engine, get_db
 from .auth import router as auth_router
-from .routers import admin, user, setup
+from .routers import admin, user, setup, whatsapp, meter
 
 # Create the database tables
 models.Base.metadata.create_all(bind=engine)
@@ -17,19 +17,10 @@ app = FastAPI(title="Electricity Management API")
 # Set up CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",     # React default
-        "http://localhost:8080",     # Vue.js default
-        "http://localhost:4200",     # Angular default
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:8080",
-        "http://127.0.0.1:4200",
-        # Add your production frontend URL when deployed
-        # "https://your-frontend-domain.com",
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["Content-Type", "Authorization", "Accept", "X-Requested-With"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Include routers
@@ -37,6 +28,8 @@ app.include_router(auth_router, tags=["Authentication"])
 app.include_router(user.router, prefix="/users", tags=["Users"])
 app.include_router(admin.router, prefix="/admin", tags=["Admin"])
 app.include_router(setup.router, prefix="/setup", tags=["Setup"])
+app.include_router(whatsapp.router, prefix="/whatsapp", tags=["WhatsApp"])
+app.include_router(meter.router, prefix="/meter", tags=["Meter"])
 
 @app.get("/")
 def read_root():

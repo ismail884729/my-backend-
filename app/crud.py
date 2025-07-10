@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
+from sqlalchemy import func
 from datetime import datetime
 from typing import Optional, List
 from . import models, schemas
@@ -138,7 +139,7 @@ def get_all_transactions(db: Session, skip: int = 0, limit: int = 100, status: O
     
     return query.order_by(desc(models.Transaction.created_at)).offset(skip).limit(limit).all()
 
-def create_transaction(db: Session, user_id: int, rate_id: int, units: float, amount: float, payment_method: str, device_id: Optional[str] = None, notes: Optional[str] = None):
+def create_transaction(db: Session, user_id: int, rate_id: int, units: float, amount: float, payment_method: str, device_id: Optional[str] = None, notes: Optional[str] = None, rate_price_per_unit: float = 0.0):
     # Get the user
     user = get_user(db, user_id)
     if not user:
@@ -166,8 +167,8 @@ def create_transaction(db: Session, user_id: int, rate_id: int, units: float, am
         units_purchased=units,
         transaction_reference=transaction_ref,
         status=models.TransactionStatus.PENDING,
-        balance_before=user.unit_balance,
-        balance_after=user.unit_balance + units,
+        balance_before=user.unit_balance, # Monetary balance before transaction
+        balance_after=user.unit_balance - amount, # Monetary balance after transaction
         device_id=device_id,
         payment_method=payment_method,
         notes=notes,
@@ -175,11 +176,16 @@ def create_transaction(db: Session, user_id: int, rate_id: int, units: float, am
     )
     
     db.add(db_transaction)
+    
+    # Update user's unit balance (monetary)
+    user.unit_balance -= amount
+    
     db.commit()
     db.refresh(db_transaction)
+    db.refresh(user) # Refresh user to ensure latest balance is reflected
     return db_transaction
     
-def create_json_purchase(db: Session, user_id: int, purchase_data: schemas.JsonPurchase):
+def create_json_purchase(db: Session, user_id: int, purchase_data: schemas.JsonPurchase, rate_price_per_unit: float = 0.0):
     """
     Process a purchase made via JSON payload with direct money transfer to admin
     """
@@ -219,8 +225,8 @@ def create_json_purchase(db: Session, user_id: int, purchase_data: schemas.JsonP
         units_purchased=purchase_data.units,
         transaction_reference=transaction_ref,
         status=models.TransactionStatus.PENDING,
-        balance_before=user.unit_balance,
-        balance_after=user.unit_balance + purchase_data.units,
+        balance_before=user.unit_balance, # Monetary balance before transaction
+        balance_after=user.unit_balance - amount, # Monetary balance after transaction
         device_id=device_id,
         payment_method="direct_transfer",  # Fixed payment method
         notes=purchase_data.notes,
@@ -228,9 +234,13 @@ def create_json_purchase(db: Session, user_id: int, purchase_data: schemas.JsonP
     )
     
     db.add(db_transaction)
+    
+    # Update user's unit balance (monetary)
+    user.unit_balance -= amount
+    
     db.commit()
     db.refresh(db_transaction)
-    return db_transaction
+    db.refresh(user) # Refresh user to ensure latest balance is reflected
 
 def update_transaction_status(db: Session, transaction_id: int, status: str):
     db_transaction = get_transaction(db, transaction_id)
@@ -459,6 +469,59 @@ def get_user_with_devices(db: Session, user_id: int):
     }
     return user_dict
 
+def get_dashboard_stats(db: Session):
+    """Get dashboard stats for the admin."""
+    total_users = db.query(models.User).count()
+    total_devices = db.query(models.DeviceStatus).count()
+    total_revenue = db.query(func.sum(models.Transaction.amount)).scalar() or 0.0
+    active_devices = db.query(models.DeviceStatus).filter(models.DeviceStatus.is_online == True).count()
+    units_sold = db.query(func.sum(models.Transaction.units_purchased)).scalar() or 0.0
+    recent_transactions = db.query(models.Transaction).order_by(desc(models.Transaction.created_at)).limit(5).all()
+
+    return {
+        "total_users": total_users,
+        "total_devices": total_devices,
+        "total_revenue": total_revenue,
+        "active_devices": active_devices,
+        "units_sold": units_sold,
+        "recent_transactions": recent_transactions,
+    }
+
+def get_billing_statistics(db: Session):
+    """Get billing statistics for the admin."""
+    total_revenue = db.query(func.sum(models.Transaction.amount)).scalar() or 0.0
+    total_transactions = db.query(models.Transaction).count()
+    average_transaction_value = total_revenue / total_transactions if total_transactions > 0 else 0.0
+
+    return {
+        "total_revenue": total_revenue,
+        "total_transactions": total_transactions,
+        "average_transaction_value": average_transaction_value,
+    }
+
+def get_user_usage(db: Session, user_id: int):
+    """Get a user's usage summary and transaction history."""
+    # Get all completed transactions for the user
+    transactions = db.query(models.Transaction).filter(
+        models.Transaction.user_id == user_id,
+        models.Transaction.status == models.TransactionStatus.COMPLETED
+    ).all()
+    
+    # Calculate total units purchased and amount spent
+    total_units = sum(t.units_purchased for t in transactions)
+    total_amount = sum(t.amount for t in transactions)
+    
+    # Create summary
+    summary = {
+        "total_units_purchased": total_units,
+        "total_amount_spent": total_amount
+    }
+    
+    return {
+        "summary": summary,
+        "transactions": transactions
+    }
+
 def update_device_name(db: Session, device_id: str, device_name: str):
     db_device = get_device_by_id(db, device_id)
     if not db_device:
@@ -467,6 +530,32 @@ def update_device_name(db: Session, device_id: str, device_name: str):
     db_device.device_name = device_name
     db_device.updated_at = datetime.utcnow()
     
+    db.commit()
+    db.refresh(db_device)
+    return db_device
+
+def update_device(db: Session, device_id: str, device_update: schemas.DeviceUpdate):
+    db_device = get_device_by_id(db, device_id)
+    if not db_device:
+        return None
+
+    update_data = device_update.dict(exclude_unset=True)
+
+    # Handle is_primary logic
+    if "is_primary" in update_data and update_data["is_primary"] is True:
+        # If this device is being made primary, set all other devices for this user to not primary
+        if db_device.user_id:
+            db.query(models.DeviceStatus).filter(
+                models.DeviceStatus.user_id == db_device.user_id,
+                models.DeviceStatus.is_primary == True,
+                models.DeviceStatus.device_id != device_id
+            ).update({"is_primary": False})
+            db.commit() # Commit this change before updating the current device
+
+    for field, value in update_data.items():
+        setattr(db_device, field, value)
+
+    db_device.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(db_device)
     return db_device

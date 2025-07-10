@@ -12,24 +12,10 @@ from ..database import get_db
 
 router = APIRouter()
 
-@router.get("/dashboard")
-def admin_dashboard(db: Session = Depends(get_db)):
-    # This will be replaced with actual admin authentication later
-    # Get counts for dashboard
-    user_count = db.query(models.User).count()
-    device_count = db.query(models.DeviceStatus).count()
-    online_devices = db.query(models.DeviceStatus).filter(models.DeviceStatus.is_online == True).count()
-    total_transactions = db.query(models.Transaction).count()
-    
-    return {
-        "message": "Admin dashboard",
-        "stats": {
-            "total_users": user_count,
-            "total_devices": device_count,
-            "online_devices": online_devices,
-            "total_transactions": total_transactions
-        }
-    }
+@router.get("/dashboard", response_model=schemas.AdminDashboardStats)
+def get_dashboard_stats(db: Session = Depends(get_db)):
+    """Get dashboard statistics for the admin."""
+    return crud.get_dashboard_stats(db)
 
 # System Settings Management Endpoints for Admins
 
@@ -669,6 +655,17 @@ def deactivate_user(user_id: int, db: Session = Depends(get_db)):
     db.refresh(user)
     return user
 
+# Billing Endpoints
+@router.get("/billing", response_model=List[schemas.AdminTransactionResponse])
+def get_billing_info(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    """Get all transactions for billing purposes."""
+    return crud.get_all_transactions(db, skip=skip, limit=limit)
+
+@router.get("/billing/statistics", response_model=schemas.BillingStatistics)
+def get_billing_statistics(db: Session = Depends(get_db)):
+    """Get billing statistics."""
+    return crud.get_billing_statistics(db)
+
 # Electricity Rate Management Endpoints for Admins
 
 @router.get("/rates", response_model=List[schemas.ElectricityRateResponse])
@@ -748,7 +745,7 @@ def activate_electricity_rate(rate_id: int, db: Session = Depends(get_db)):
 # Device Management Endpoints for Admins
 
 @router.get("/devices", response_model=List[schemas.DeviceStatusResponse])
-def list_all_devices(
+def list_all_devices_admin(
     skip: int = 0,
     limit: int = 100,
     is_online: Optional[bool] = None,
@@ -774,6 +771,20 @@ def get_device(device_id: str, db: Session = Depends(get_db)):
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
     return device
+
+@router.put("/devices/{device_id}", response_model=schemas.DeviceStatusResponse)
+def update_device_admin(
+    device_id: str,
+    device_update: schemas.DeviceUpdate,
+    db: Session = Depends(get_db)
+):
+    """
+    Update a device's information.
+    """
+    db_device = crud.update_device(db, device_id, device_update)
+    if not db_device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return db_device
     
 @router.get("/device-details/{device_id}", response_model=schemas.DeviceDetailResponse)
 def get_device_details(device_id: str, db: Session = Depends(get_db)):
@@ -1139,7 +1150,7 @@ def bulk_user_action(action_data: BulkUserAction, db: Session = Depends(get_db))
     return results
 
 @router.post("/users/{user_id}/set-admin-role", response_model=schemas.UserResponse)
-def set_admin_role(user_id: int, make_admin: bool = True, db: Session = Depends(get_db)):
+def set_admin_role_admin(user_id: int, make_admin: bool = True, db: Session = Depends(get_db)):
     """
     Promote a user to admin or demote an admin to regular user.
     Special protection: User with ID 3 (main admin) cannot be demoted.

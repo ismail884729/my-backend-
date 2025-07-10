@@ -37,8 +37,7 @@ def seed_initial_data(db: Session = Depends(get_db)):
                 unit_balance=50.0,
                 is_active=True,
                 created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
-                device_id="device-001"
+                updated_at=datetime.utcnow()
             )
             db.add(user1)
             db.commit()
@@ -58,8 +57,7 @@ def seed_initial_data(db: Session = Depends(get_db)):
                 unit_balance=75.0,
                 is_active=True,
                 created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
-                device_id="device-002"
+                updated_at=datetime.utcnow()
             )
             db.add(user2)
             db.commit()
